@@ -11,9 +11,8 @@ TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 NOTIFIED_FILE = 'notified_songs.json'
 LAST_NOTIFICATION_FILE = 'last_notification.json'
 
-VIEWS_PER_DAY_THRESHOLD = 50000  # знизив до 50k
+VIEWS_PER_DAY_THRESHOLD = 50000
 MAX_AGE_DAYS = 10
-TOP_RESULTS = 5  # тепер до 5 пісень
 
 SEARCH_QUERIES = [
     'новая русская музыка клип 2026',
@@ -23,10 +22,32 @@ SEARCH_QUERIES = [
     'русская попса новинка',
 ]
 
-REGIONS = ['RU', 'BY', 'KZ', 'UA']
+REGIONS = ['RU', 'BY', 'KZ']  # прибрав UA щоб менше українського
 
 def has_cyrillic(text):
     return bool(re.search('[а-яА-ЯёЁ]', text))
+
+def is_likely_ukrainian(text):
+    # Унікальні українські літери яких немає в російській
+    ukrainian_chars = re.compile('[їЇєЄґҐ\u0456\u0406]')  # ї, є, ґ, і (укр.)
+    return bool(ukrainian_chars.search(text))
+
+def is_russian_music(title, channel, audio_language=None):
+    combined = title + ' ' + channel
+
+    # Якщо YouTube явно вказує мову аудіо
+    if audio_language and audio_language not in ('ru', ''):
+        return False
+
+    # Якщо є кирилиця — добре
+    if not has_cyrillic(combined):
+        return False
+
+    # Якщо є українські унікальні символи — виключаємо
+    if is_likely_ukrainian(combined):
+        return False
+
+    return True
 
 def load_json(filepath, default):
     if os.path.exists(filepath):
@@ -65,7 +86,7 @@ def get_trending_music():
         r = requests.get(url, params=params)
         for item in r.json().get('items', []):
             all_items[item['id']] = item
-    print(f"Trending: знайдено {len(all_items)} відео")
+    print(f"Trending: знайдено {len(all_items)} відео з {len(REGIONS)} регіонів")
     return list(all_items.values())
 
 def search_russian_music():
@@ -89,7 +110,7 @@ def search_russian_music():
         for item in r.json().get('items', []):
             all_ids.add(item['id']['videoId'])
 
-    print(f"Search: знайдено {len(all_ids)} унікальних відео")
+    print(f"Search: знайдено {len(all_ids)} унікальних відео по {len(SEARCH_QUERIES)} запитах")
     return get_video_details(list(all_ids))
 
 def views_per_day(view_count, published_at):
@@ -109,6 +130,9 @@ def send_telegram(message):
 def process_videos(videos, notified):
     rising = []
     seen_ids = set()
+    skipped_ukrainian = 0
+    skipped_not_cyrillic = 0
+    skipped_old_or_low = 0
 
     for v in videos:
         vid_id = v['id'] if isinstance(v['id'], str) else v['id']
@@ -122,23 +146,36 @@ def process_videos(videos, notified):
         channel = snippet.get('channelTitle', '')
         published_at = snippet.get('publishedAt', '')
         view_count = int(stats.get('viewCount', 0))
+        audio_lang = snippet.get('defaultAudioLanguage', '')
 
-        if not has_cyrillic(title) and not has_cyrillic(channel):
+        if not has_cyrillic(title + channel):
+            skipped_not_cyrillic += 1
+            continue
+
+        if is_likely_ukrainian(title + channel):
+            skipped_ukrainian += 1
             continue
 
         vpd, days_old = views_per_day(view_count, published_at)
 
-        if days_old <= MAX_AGE_DAYS and vpd >= VIEWS_PER_DAY_THRESHOLD:
-            rising.append({
-                'id': vid_id,
-                'title': title,
-                'channel': channel,
-                'views': view_count,
-                'vpd': int(vpd),
-                'days': round(days_old, 1),
-                'url': f"https://www.youtube.com/watch?v={vid_id}"
-            })
+        if days_old > MAX_AGE_DAYS or vpd < VIEWS_PER_DAY_THRESHOLD:
+            skipped_old_or_low += 1
+            continue
 
+        rising.append({
+            'id': vid_id,
+            'title': title,
+            'channel': channel,
+            'views': view_count,
+            'vpd': int(vpd),
+            'days': round(days_old, 1),
+            'url': f"https://www.youtube.com/watch?v={vid_id}"
+        })
+
+    print(f"  Пропущено (не кирилиця): {skipped_not_cyrillic}")
+    print(f"  Пропущено (українські): {skipped_ukrainian}")
+    print(f"  Пропущено (старі або мало переглядів): {skipped_old_or_low}")
+    print(f"  Відповідають критеріям: {len(rising)}")
     return rising
 
 def main():
@@ -162,32 +199,39 @@ def main():
     print(f"Всього унікальних відео для аналізу: {len(all_videos)}")
 
     rising = process_videos(list(all_videos.values()), notified)
-    print(f"Відповідають критеріям: {len(rising)}")
 
     if not rising:
         print("Нових хітів не знайдено.")
         return
 
+    # Сортуємо по швидкості зростання
     rising.sort(key=lambda x: x['vpd'], reverse=True)
-    top = rising[:TOP_RESULTS]
 
-    msg = "🔥 <b>Майбутні хіти — злітають прямо зараз!</b>\n\n"
-    for h in top:
-        msg += f"🎵 <b>{h['title']}</b>\n"
-        msg += f"👤 {h['channel']}\n"
-        msg += f"👁 {h['views']:,} переглядів за {h['days']} дн. "
-        msg += f"(<b>{h['vpd']:,}/день</b>)\n"
-        msg += f"🔗 {h['url']}\n\n"
+    # Надсилаємо ВСІ знайдені — розбиваємо на повідомлення по 5 штук
+    chunks = [rising[i:i+5] for i in range(0, len(rising), 5)]
 
-    send_telegram(msg)
+    for idx, chunk in enumerate(chunks):
+        if idx == 0:
+            msg = f"🔥 <b>Майбутні хіти — злітають прямо зараз! ({len(rising)} пісень)</b>\n\n"
+        else:
+            msg = f"🔥 <b>Продовження ({idx+1}/{len(chunks)})</b>\n\n"
 
-    for h in top:
+        for h in chunk:
+            msg += f"🎵 <b>{h['title']}</b>\n"
+            msg += f"👤 {h['channel']}\n"
+            msg += f"👁 {h['views']:,} переглядів за {h['days']} дн. "
+            msg += f"(<b>{h['vpd']:,}/день</b>)\n"
+            msg += f"🔗 {h['url']}\n\n"
+
+        send_telegram(msg)
+
+    for h in rising:
         notified[h['id']] = today
     last_notif['date'] = today
 
     save_json(NOTIFIED_FILE, notified)
     save_json(LAST_NOTIFICATION_FILE, last_notif)
-    print(f"Надіслано {len(top)} хітів.")
+    print(f"Надіслано {len(rising)} хітів у {len(chunks)} повідомленнях.")
 
 if __name__ == '__main__':
     main()
