@@ -2,7 +2,7 @@ import requests
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 YOUTUBE_API_KEY = os.environ['YOUTUBE_API_KEY']
 TELEGRAM_BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
@@ -11,9 +11,19 @@ TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 NOTIFIED_FILE = 'notified_songs.json'
 LAST_NOTIFICATION_FILE = 'last_notification.json'
 
-VIEWS_PER_DAY_THRESHOLD = 100000  # знизив до 100k — рос. музика менш масштабна
+VIEWS_PER_DAY_THRESHOLD = 50000  # знизив до 50k
 MAX_AGE_DAYS = 10
-TOP_RESULTS = 3
+TOP_RESULTS = 5  # тепер до 5 пісень
+
+SEARCH_QUERIES = [
+    'новая русская музыка клип 2026',
+    'новинки русской музыки 2026',
+    'русский поп новинка клип',
+    'новый трек русский 2026',
+    'русская попса новинка',
+]
+
+REGIONS = ['RU', 'BY', 'KZ', 'UA']
 
 def has_cyrillic(text):
     return bool(re.search('[а-яА-ЯёЁ]', text))
@@ -28,50 +38,59 @@ def save_json(filepath, data):
     with open(filepath, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def get_trending_music():
+def get_video_details(video_ids):
+    if not video_ids:
+        return []
     url = "https://www.googleapis.com/youtube/v3/videos"
     params = {
         'part': 'snippet,statistics',
-        'chart': 'mostPopular',
-        'videoCategoryId': '10',
-        'regionCode': 'RU',
-        'maxResults': 50,
+        'id': ','.join(video_ids[:50]),
         'key': YOUTUBE_API_KEY
     }
     r = requests.get(url, params=params)
     return r.json().get('items', [])
 
+def get_trending_music():
+    all_items = {}
+    for region in REGIONS:
+        url = "https://www.googleapis.com/youtube/v3/videos"
+        params = {
+            'part': 'snippet,statistics',
+            'chart': 'mostPopular',
+            'videoCategoryId': '10',
+            'regionCode': region,
+            'maxResults': 50,
+            'key': YOUTUBE_API_KEY
+        }
+        r = requests.get(url, params=params)
+        for item in r.json().get('items', []):
+            all_items[item['id']] = item
+    print(f"Trending: знайдено {len(all_items)} відео")
+    return list(all_items.values())
+
 def search_russian_music():
-    """Додатковий пошук конкретно по російській музиці"""
-    url = "https://www.googleapis.com/youtube/v3/search"
-    params = {
-        'part': 'snippet',
-        'q': 'новая русская музыка 2025 клип',
-        'type': 'video',
-        'videoCategoryId': '10',
-        'regionCode': 'RU',
-        'relevanceLanguage': 'ru',
-        'order': 'viewCount',
-        'publishedAfter': (datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0
-        ) - __import__('datetime').timedelta(days=MAX_AGE_DAYS)).strftime('%Y-%m-%dT%H:%M:%SZ'),
-        'maxResults': 25,
-        'key': YOUTUBE_API_KEY
-    }
-    r = requests.get(url, params=params)
-    ids = [item['id']['videoId'] for item in r.json().get('items', [])]
-    if not ids:
-        return []
-    
-    # отримати деталі по знайдених відео
-    details_url = "https://www.googleapis.com/youtube/v3/videos"
-    details_params = {
-        'part': 'snippet,statistics',
-        'id': ','.join(ids),
-        'key': YOUTUBE_API_KEY
-    }
-    dr = requests.get(details_url, params=details_params)
-    return dr.json().get('items', [])
+    published_after = (datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    all_ids = set()
+
+    for query in SEARCH_QUERIES:
+        url = "https://www.googleapis.com/youtube/v3/search"
+        params = {
+            'part': 'snippet',
+            'q': query,
+            'type': 'video',
+            'videoCategoryId': '10',
+            'relevanceLanguage': 'ru',
+            'order': 'viewCount',
+            'publishedAfter': published_after,
+            'maxResults': 25,
+            'key': YOUTUBE_API_KEY
+        }
+        r = requests.get(url, params=params)
+        for item in r.json().get('items', []):
+            all_ids.add(item['id']['videoId'])
+
+    print(f"Search: знайдено {len(all_ids)} унікальних відео")
+    return get_video_details(list(all_ids))
 
 def views_per_day(view_count, published_at):
     published = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
@@ -89,10 +108,13 @@ def send_telegram(message):
 
 def process_videos(videos, notified):
     rising = []
+    seen_ids = set()
+
     for v in videos:
         vid_id = v['id'] if isinstance(v['id'], str) else v['id']
-        if vid_id in notified:
+        if vid_id in notified or vid_id in seen_ids:
             continue
+        seen_ids.add(vid_id)
 
         snippet = v['snippet']
         stats = v.get('statistics', {})
@@ -101,7 +123,6 @@ def process_videos(videos, notified):
         published_at = snippet.get('publishedAt', '')
         view_count = int(stats.get('viewCount', 0))
 
-        # Фільтр: тільки відео з кирилицею в назві або назві каналу
         if not has_cyrillic(title) and not has_cyrillic(channel):
             continue
 
@@ -117,6 +138,7 @@ def process_videos(videos, notified):
                 'days': round(days_old, 1),
                 'url': f"https://www.youtube.com/watch?v={vid_id}"
             })
+
     return rising
 
 def main():
@@ -128,17 +150,19 @@ def main():
         print("Вже надсилали сьогодні — пропускаємо.")
         return
 
-    # Два джерела: тренди + пошук
     trending = get_trending_music()
     searched = search_russian_music()
-    
+
     all_videos = {v['id']: v for v in trending}
     for v in searched:
         vid_id = v['id']
         if vid_id not in all_videos:
             all_videos[vid_id] = v
 
+    print(f"Всього унікальних відео для аналізу: {len(all_videos)}")
+
     rising = process_videos(list(all_videos.values()), notified)
+    print(f"Відповідають критеріям: {len(rising)}")
 
     if not rising:
         print("Нових хітів не знайдено.")
