@@ -2,18 +2,28 @@ name: Music Hit Tracker
 
 on:
   schedule:
-    - cron: '0 6,12,18,22 * * *'  # 4 рази на день
+    - cron: '0 6,12,18,22 * * *'  # 4 рази на день (UTC)
   workflow_dispatch:
+
+# Права потрібні, щоб крок "Save state" міг запушити оновлений стан.
+permissions:
+  contents: write
+
+# Не даємо запускам накладатися один на одного (інакше конфлікти при push).
+concurrency:
+  group: music-tracker
+  cancel-in-progress: false
 
 jobs:
   track:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -30,6 +40,20 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add notified_songs.json last_notification.json
-          git diff --staged --quiet || git commit -m "Update tracker state"
-          git push
+          git add notified_songs.json last_notification.json weekly_songs.json
+          if git diff --staged --quiet; then
+            echo "Немає змін стану для збереження."
+            exit 0
+          fi
+          git commit -m "Update tracker state"
+          for i in 1 2 3 4 5; do
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "Стан збережено."
+              exit 0
+            fi
+            echo "Push не вдався (спроба $i), роблю rebase і повторюю..."
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            sleep $((2 ** i))
+          done
+          echo "❌ Не вдалося запушити стан після повторних спроб."
+          exit 1
