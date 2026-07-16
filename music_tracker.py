@@ -22,9 +22,12 @@ NOTIFIED_FILE = 'notified_songs.json'
 LAST_NOTIFICATION_FILE = 'last_notification.json'
 WEEKLY_FILE = 'weekly_songs.json'
 
-VIEWS_PER_DAY_THRESHOLD = 50000
+VIEWS_PER_DAY_THRESHOLD = 30000
 WEEKLY_MIN_VIEWS_PER_DAY = 5000
 MAX_AGE_DAYS = 10
+# Якщо жодна пісня не дотягує до порога хіта — усе одно надсилаємо топ-N
+# найшвидше зростаючих, щоб щоденне сповіщення не було порожнім у спокійні дні.
+DAILY_FALLBACK_COUNT = 3
 # Скільки днів зберігати ID у списку сповіщених. Відео старші за MAX_AGE_DAYS
 # все одно відсіюються, тому такий запас гарантує відсутність повторів,
 # але не даємо файлу рости безмежно.
@@ -332,7 +335,7 @@ def send_saturday_digest(weekly_songs):
 
     header = (
         f"📅 <b>Суботній дайджест — нові російські пісні за тиждень ({len(songs)} пісень)</b>\n"
-        f"<i>Від 5,000 до 50,000 переглядів/день — ростуть але ще не хіти</i>"
+        f"<i>Від 5,000 до 30,000 переглядів/день — ростуть але ще не хіти</i>"
     )
     sent_ids = send_messages(header, songs, cont_emoji='📅')
 
@@ -371,21 +374,31 @@ def main():
     for s in weekly_candidates:
         weekly_songs[s['id']] = s
 
-    # Щоденне сповіщення про хіти. Дедуплікація — через notified,
-    # тому нові хіти надсилаються одразу за будь-якого запуску.
-    if rising:
-        rising.sort(key=lambda x: x['vpd'], reverse=True)
-        header = f"🔥 <b>Майбутні хіти — злітають прямо зараз! ({len(rising)} пісень)</b>"
-        sent_ids = send_messages(header, rising)
-        for h in rising:
-            if h['id'] in sent_ids:
-                notified[h['id']] = today
-                weekly_songs.pop(h['id'], None)  # хіт більше не кандидат
-        if sent_ids:
-            last_notif['date'] = today
-        print(f"Надіслано {len(sent_ids)}/{len(rising)} щоденних хітів.")
+    # Щоденне сповіщення — раз на день. Беремо сильні хіти (>= порога), а
+    # якщо їх немає — топ найшвидше зростаючих пісень, щоб день не був
+    # порожнім навіть у спокійні періоди. Дедуплікація — через notified.
+    if last_notif.get('date') != today:
+        daily = list(rising)
+        if not daily:
+            daily = sorted(weekly_candidates, key=lambda x: x['vpd'], reverse=True)[:DAILY_FALLBACK_COUNT]
+
+        if daily:
+            daily.sort(key=lambda x: x['vpd'], reverse=True)
+            header = f"🔥 <b>Пісні, що набирають популярність зараз! ({len(daily)} шт.)</b>"
+            sent_ids = send_messages(header, daily)
+            for h in daily:
+                if h['id'] in sent_ids:
+                    notified[h['id']] = today
+                    weekly_songs.pop(h['id'], None)  # надіслане більше не кандидат на суботу
+            # Позначаємо день закритим лише коли все надіслано; при частковому
+            # збої залишок піде наступного запуску (без дублів — через notified).
+            if len(sent_ids) == len(daily):
+                last_notif['date'] = today
+            print(f"Надіслано {len(sent_ids)}/{len(daily)} пісень для щоденного сповіщення.")
+        else:
+            print("Немає пісень для щоденного сповіщення.")
     else:
-        print("Щоденних хітів немає.")
+        print("Щоденне сповіщення вже надсилали сьогодні.")
 
     # Суботній дайджест. Прибираємо лише успішно надіслані пісні, тому при
     # частковому збої повтор надішле тільки залишок, без дублів.
