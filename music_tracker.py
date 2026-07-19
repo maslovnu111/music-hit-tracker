@@ -23,7 +23,7 @@ LAST_NOTIFICATION_FILE = 'last_notification.json'
 WEEKLY_FILE = 'weekly_songs.json'
 
 VIEWS_PER_DAY_THRESHOLD = 50000
-WEEKLY_MIN_VIEWS_PER_DAY = 5000
+WEEKLY_MIN_VIEWS_PER_DAY = 10000
 MAX_AGE_DAYS = 10
 # Скільки днів зберігати ID у списку сповіщених. Відео старші за MAX_AGE_DAYS
 # все одно відсіюються, тому такий запас гарантує відсутність повторів,
@@ -66,13 +66,26 @@ SEARCH_QUERIES = [
 REGIONS = ['RU']
 
 
+# Літери стандартного російського алфавіту (включно з ё/Ё).
+RUSSIAN_CYRILLIC = frozenset(
+    'абвгдеёжзийклмнопрстуфхцчшщъыьэюя'
+    'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ'
+)
+
+
 def has_cyrillic(text):
     return bool(re.search('[а-яА-ЯёЁ]', text))
 
 
-def is_likely_ukrainian(text):
-    ukrainian_chars = re.compile('[їЇєЄґҐіІ]')
-    return bool(ukrainian_chars.search(text))
+def is_likely_non_russian(text):
+    """True, якщо в тексті є кирилична літера, якої немає в російському
+    алфавіті — ознака іншої мови (українська, білоруська, казахська,
+    киргизька, таджицька, сербська тощо). Нам потрібні лише російські пісні."""
+    for ch in text:
+        # Діапазони Cyrillic (U+0400–04FF) та Cyrillic Supplement (U+0500–052F)
+        if ('Ѐ' <= ch <= 'ӿ' or 'Ԁ' <= ch <= 'ԯ') and ch not in RUSSIAN_CYRILLIC:
+            return True
+    return False
 
 
 def load_json(filepath, default):
@@ -258,7 +271,7 @@ def process_videos(videos, notified):
     weekly_candidates = []
     seen_ids = set()
     skipped_not_cyrillic = 0
-    skipped_ukrainian = 0
+    skipped_non_russian = 0
     skipped_old_or_low = 0
 
     for v in videos:
@@ -283,8 +296,8 @@ def process_videos(videos, notified):
             skipped_not_cyrillic += 1
             continue
 
-        if is_likely_ukrainian(title + channel):
-            skipped_ukrainian += 1
+        if is_likely_non_russian(title + channel):
+            skipped_non_russian += 1
             continue
 
         published = parse_published(published_at)
@@ -320,7 +333,7 @@ def process_videos(videos, notified):
             skipped_old_or_low += 1
 
     print(f"  Пропущено (не кирилиця): {skipped_not_cyrillic}")
-    print(f"  Пропущено (українські): {skipped_ukrainian}")
+    print(f"  Пропущено (не російські): {skipped_non_russian}")
     print(f"  Пропущено (старі або мало переглядів): {skipped_old_or_low}")
     print(f"  Щоденні хіти: {len(rising)}")
     print(f"  Кандидатів для суботи (нові/оновлені): {len(weekly_candidates)}")
@@ -343,7 +356,7 @@ def send_saturday_digest(weekly_songs):
 
     header = (
         f"📅 <b>Суботній дайджест — нові російські пісні за тиждень ({len(songs)} пісень)</b>\n"
-        f"<i>Від 5,000 до 50,000 переглядів/день — ростуть але ще не хіти</i>"
+        f"<i>Від 10,000 до 50,000 переглядів/день — ростуть але ще не хіти</i>"
     )
     sent_ids = send_messages(header, songs, cont_emoji='📅')
 
