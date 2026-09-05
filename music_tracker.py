@@ -23,7 +23,7 @@ LAST_NOTIFICATION_FILE = 'last_notification.json'
 WEEKLY_FILE = 'weekly_songs.json'
 
 VIEWS_PER_DAY_THRESHOLD = 50000
-WEEKLY_MIN_VIEWS_PER_DAY = 10000
+WEEKLY_MIN_VIEWS_PER_DAY = 25000
 MAX_AGE_DAYS = 10
 # Скільки днів зберігати ID у списку сповіщених. Відео старші за MAX_AGE_DAYS
 # все одно відсіюються, тому такий запас гарантує відсутність повторів,
